@@ -2,10 +2,9 @@
 
 import argparse
 import re
-import sys
-import urllib.parse
 
 import requests
+from lxml import html
 
 # todo ####################
 # > better junk exclusion
@@ -21,12 +20,27 @@ class dg():
     junk_strings = ['facebook.com/', 'pinterest.com/', 'quora.com/', 'youtube.com/', 'youtu.be/']
     junk_exclusion = r"(?:" + "|".join(junk_strings).replace(".", "\.") + ")"
 
-    def __init__(self, query="", pages=1, offset=0, time_window='a', exclude_junk=True):
+    def __init__(self, query="", pages=1, offset=0, time_window='a', exclude_junk=True, headers=None):
         self.query = query
         self.pages = pages
         self.offset = offset
         self.time_window = time_window
         self.exclude_junk = exclude_junk
+        self.headers = self.get_headers(headers)
+
+    def get_headers(self, custom_headers):
+        res = {}
+        if custom_headers:
+            for header in custom_headers:
+                kv = header.split(":")
+                if(len(kv) == 1):
+                    raise Exception("One or more headers do not have a ':' seperator!")
+                res[kv[0].lower().strip()] = kv[1].strip()
+        
+        if not res.get('user-agent'):
+            res['user-agent'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0" # Needed for getting a valid response
+
+        return res
 
     # normalize + run search.. supports page, offset, timeframe (tbs parameter)
     def search(self, page):
@@ -44,60 +58,12 @@ class dg():
         normalized_query = re.sub(r'"|\"', '%22', normalized_query)
         url = f"https://google.com/search?start={pg}&tbs=qdr:{self.time_window}&q={normalized_query}&filter=0"
 
-        return requests.get(url)
-
-
-    # validate, split, normalize entries.. return list with the extracted url+desc for each search result
-    def extract_fields(self, entries):
-        valid_entries = []
-        search_results = [] # where your final results will live
-
-        for entry in entries: # find segments that ends with one of these pieces i cant remember why right now though
-            if entry[-11:] == '</div></h3>' or entry[-6:] == '</div>' or entry[-7:] == '</span>' or entry[-12:] == '</span></h3>':
-                valid_entries.append(entry)
-
-        if valid_entries:
-            for entry in valid_entries:
-                url = ""
-                desc = ""
-                find_url = re.split('<a href="/url\?q=|&amp;(sa|usg|ved)=', entry)
-                for segment in find_url:
-                    if segment and segment[0:4] == 'http':
-                        # lazy exclusion for some junk results
-                        if self.exclude_junk and re.search(self.junk_exclusion, segment):
-                            continue
-                        url = segment
-                if not url: # If no url, don't bother trying to extract a description
-                    continue
-                else:
-                    find_desc = re.split('<[spandiv]{3,4} class=".+?(?=">)">|</[spandiv]{3,4}>', entry)
-                    for segment in find_desc:
-                        if segment and segment[0] != "<":
-                            desc = segment
-
-                # normalize result link
-                if url and desc:
-                    url = re.sub(r'%20', '+', url)
-                    url = urllib.parse.unquote(url)
-                    url = re.sub(r'\|', '%7C', url)
-                    url = re.sub(r'\"', '%22', url)
-                    url = re.sub(r'\>', '%3E', url)
-                    url = re.sub(r'\<', '%3C', url)
-                    if url[-1] == '.':
-                        url = url[0:-1] + '%2E'
-                    desc = re.sub(r'&amp;', '&', desc)
-                    result = {'desc': desc, 'url': url}
-                    search_results.append(result)
-
-        return search_results
-
+        return requests.get(url, headers=self.headers)
 
     # for each page desired, run google search + grab result entries form page contents.. returns a list of entries
     def process_query(self):
         pages = []
         entries = [] # 1 entry = 1 (url,description)
-        # capture a result entry like this:
-        match_entry = r'<a href="/url\?q=http.+?(?="><[spandiv]{3,4})"><[spandiv]{3,4} class="[A-Za-z\d ]+">.*?(?=<[spandiv]{3,4})'
 
         # run the search for each desired page until (pages+offset) reached or until a page with no results is found
         for page in range(0, self.pages):
@@ -108,8 +74,18 @@ class dg():
 
         # grab result entries on each page. they will still need to be split into url and description
         for page in pages:
-            page_entries = re.findall(match_entry, page) # grab entry matches on this page and append uniques to master entries list
-            [entries.append(page_entry) for page_entry in page_entries if page_entry not in entries]
+            page_tree = html.fromstring(page)
+            # FIXME: One selector should be used
+            page_urls = page_tree.cssselect("div > div:nth-child(1) > div:nth-child(1) > div > a[data-usg]")
+            page_desc = page_tree.cssselect("div[data-content-feature] > div:nth-child(1)")
+
+            for i in range(0, len(page_urls)):
+                entries.append({
+                    "url": page_urls[i].get('href'), 
+                    "desc": page_desc[i].text
+                    }
+                )
+                # print((page_urls[i].get('href'), page_desc[i].text))
 
         return entries
 
@@ -118,7 +94,7 @@ class dg():
     # search google for your query and return search_results, all cleaned URLs + descriptions from each page
     def run(self):
         try:
-            results = self.extract_fields(self.process_query()) # query -> process_query -> search for all pages -> extract_fields -> results
+            results = self.process_query()
             return results
         except Exception as e:
             print(e)
@@ -134,6 +110,7 @@ def parse_args():
     parser.add_argument('-p', '--pages', dest='pages', type=int, default=1, help='specify multiple pages')
     parser.add_argument('-t', '--time-window', dest='time_window', type=str, default='a', help='time window')
     parser.add_argument('-j', '--exclude-junk', dest='exclude_junk', action='store_false', help='exclude junk (yt, fb, quora)')
+    parser.add_argument('-H', dest='headers', action='append', help='Add custom headers to the search request')
     return parser.parse_args()
 
 def main():
@@ -145,7 +122,7 @@ def main():
     # usage: make a dg object to run queries through #
 
     # object using command line args
-    dg1 = dg(args.query, args.pages, args.offset, args.time_window, args.exclude_junk)
+    dg1 = dg(args.query, args.pages, args.offset, args.time_window, args.exclude_junk, args.headers)
 
     # object with query set in constructor. note all other params have default values.. you can overwrite them or leave them alone
     dg2 = dg("dg2.query test")
