@@ -2,16 +2,9 @@
 
 import argparse
 import re
-
 import requests
 from lxml import html
-
-# todo ####################
-# > better junk exclusion
-# > infile outfile
-# > further filtering
-# > max results? made redundant by pages? more useful if/when meaningful filtering options exist beyond junk_strings
-# > also just make this not a hot mess anymore. what are exceptions?
+import time
 
 class dg():
 
@@ -20,14 +13,37 @@ class dg():
     junk_strings = ['facebook.com/', 'pinterest.com/', 'quora.com/', 'youtube.com/', 'youtu.be/']
     junk_exclusion = r"(?:" + "|".join(junk_strings).replace(".", "\.") + ")"
 
-    def __init__(self, query="", pages=1, offset=0, time_window='a', exclude_junk=True, headers=None):
+    def __init__(self, query="", pages=1, offset=0, time_window='a', exclude_junk=True, headers=None, all_pages=False, delay=1000, verbose=False, no_banner=False):
         self.query = query
         self.pages = pages
         self.offset = offset
         self.time_window = time_window
         self.exclude_junk = exclude_junk
         self.headers = self.get_headers(headers)
-
+        self.is_all_pages = all_pages
+        self.delay = delay
+        self.verbose = verbose
+        self.no_banner = no_banner
+    
+    def show_banner(self):
+        return print("""
+ ██████████              █████████                             ████          
+░░███░░░░███            ███░░░░░███                           ░░███          
+ ░███   ░░███  ██████  ███     ░░░   ██████   ██████   ███████ ░███   ██████ 
+ ░███    ░███ ███░░███░███          ███░░███ ███░░███ ███░░███ ░███  ███░░███
+ ░███    ░███░███████ ░███    █████░███ ░███░███ ░███░███ ░███ ░███ ░███████ 
+ ░███    ███ ░███░░░  ░░███  ░░███ ░███ ░███░███ ░███░███ ░███ ░███ ░███░░░  
+ ██████████  ░░██████  ░░█████████ ░░██████ ░░██████ ░░███████ █████░░██████ 
+░░░░░░░░░░    ░░░░░░    ░░░░░░░░░   ░░░░░░   ░░░░░░   ░░░░░███░░░░░  ░░░░░░  
+                                                      ███ ░███               
+                                                     ░░██████                
+                                                      ░░░░░░                 
+""")
+    
+    def verbose_log(self, msg):
+        if self.verbose:
+            print(msg)
+    
     def get_headers(self, custom_headers):
         res = {}
         if custom_headers:
@@ -42,63 +58,87 @@ class dg():
 
         return res
 
-    # normalize + run search.. supports page, offset, timeframe (tbs parameter)
-    def search(self, page):
-        if not self.query:
-            print("query needs to be set.")
-            return
-        pg = (self.offset*10) + (page*10) # offset factored in
+    def get_page(self, page, offset):
+        pg = (page * 10) + (offset * 10) # offset factored in
         # since the digit piece is variable, i can't use argparse.choices :(
         if (self.time_window[0] not in ('a', 'd', 'h', 'm', 'n', 'w', 'y')) or (len(self.time_window) > 1 and not self.time_window[1:].isdigit()):
-            # TODO meaningful output
-            print("invalid time interval specified.")
-            return()
+            raise Exception("Time window cannot be {}. Available options: 'a', 'd', 'h', 'm', 'n', 'w', 'y'".format(self.time_window))
 
         normalized_query = re.sub(r' |%20', '+', self.query)
         normalized_query = re.sub(r'"|\"', '%22', normalized_query)
         url = f"https://google.com/search?start={pg}&tbs=qdr:{self.time_window}&q={normalized_query}&filter=0"
 
+        self.verbose_log(url)
+
         return requests.get(url, headers=self.headers)
+
+    def extract_links(self, page_content):
+        page_tree = html.fromstring(page_content)
+        link_elements = page_tree.cssselect("div[data-sokoban-container]")
+
+        # print([(
+        #     link.cssselect("div[data-header-feature='0'] > div > a[data-usg]")[0].get('href'),
+        #     link.cssselect("div[data-content-feature='1'] > div:nth-child(1)") or link.cssselect("div[data-content-feature='2'] > div:nth-child(1)")
+        #     ) for link in link_elements])
+        
+        res = []
+        
+        for i in range(0, len(link_elements)):
+            res.append({
+                "url": link_elements[i].cssselect("div[data-header-feature='0'] > div > a[data-usg]")[0].get('href'),
+                "desc": (
+                    link_elements[i].cssselect("div[data-content-feature='1'] > div:nth-child(1)") 
+                    or 
+                    link_elements[i].cssselect("div[data-content-feature='2'] > div:nth-child(1)")
+                    )[0].text_content()
+                }
+            )
+        return res
 
     # for each page desired, run google search + grab result entries form page contents.. returns a list of entries
     def process_query(self):
         pages = []
-        entries = [] # 1 entry = 1 (url,description)
+        links = [] # 1 entry = 1 (url,description)
 
         # run the search for each desired page until (pages+offset) reached or until a page with no results is found
-        for page in range(0, self.pages):
-            r = self.search(page)
-            if "did not match any documents" in r.text: # no results on this page, we can skip those that follow
+        page = 0
+        while True:
+            if page >= self.pages and not self.is_all_pages:
                 break
-            pages.append(r.text)
+            
+            self.verbose_log("Current page: {}".format(page + 1 + self.offset))
+            
+            r = self.get_page(page, self.offset)
+            extracted_links = self.extract_links(r.text)
+            links = links + extracted_links
+            
+            print(len(links))
+            
+            if not extracted_links:
+                self.verbose_log("No more links")
+                break
+            
+            page += 1
+            time.sleep(self.delay / 1000)
 
-        # grab result entries on each page. they will still need to be split into url and description
-        for page in pages:
-            page_tree = html.fromstring(page)
-            # FIXME: One selector should be used
-            page_urls = page_tree.cssselect("div > div:nth-child(1) > div:nth-child(1) > div > a[data-usg]")
-            page_desc = page_tree.cssselect("div[data-content-feature] > div:nth-child(1)")
+        return links
 
-            for i in range(0, len(page_urls)):
-                entries.append({
-                    "url": page_urls[i].get('href'), 
-                    "desc": page_desc[i].text
-                    }
-                )
-                # print((page_urls[i].get('href'), page_desc[i].text))
-
-        return entries
-
-
-    # dg.py "query matchthis -notthis filetype:whatever"
-    # search google for your query and return search_results, all cleaned URLs + descriptions from each page
     def run(self):
-        try:
-            results = self.process_query()
-            return results
-        except Exception as e:
-            print(e)
+        if not self.no_banner:
+            self.show_banner()
+        self.verbose_log("""
+Current options:
+Query: {}
+Pages: {}
+Offset: {}
+Delay: {}ms
+""".format(self.query, self.pages, self.offset, self.delay))
+        
+        if not self.query or self.query == "":
+            print("Error: Query not specified.")
             return
+        
+        return self.process_query()
 
 def parse_args():
     """Parse command line interface arguments."""
@@ -108,41 +148,37 @@ def parse_args():
     parser.add_argument('query', type=str, help='search query')
     parser.add_argument('-o', '--offset', dest='offset', type=int, default=0, help='page offset to start from')
     parser.add_argument('-p', '--pages', dest='pages', type=int, default=1, help='specify multiple pages')
+    parser.add_argument('-A', '--all-pages', dest='all_pages', action="store_true", help='get all pages available. (bigger priority than -p)') # TODO
+    parser.add_argument('-d', '--delay', dest='delay', type=int, default=1000, help='specify delay between requests in ms. (DEFAULT: 1000)')
     parser.add_argument('-t', '--time-window', dest='time_window', type=str, default='a', help='time window')
+    parser.add_argument('--urls-only', dest='url_only', action='store_true', help='omit link description')
+    parser.add_argument('-v', '--verbose', dest='verbose', action='store_true', help='show verbose output')
+    parser.add_argument('--no-banner', dest='no_banner', action='store_true', help='do not show banner')
     parser.add_argument('-j', '--exclude-junk', dest='exclude_junk', action='store_false', help='exclude junk (yt, fb, quora)')
     parser.add_argument('-H', dest='headers', action='append', help='Add custom headers to the search request')
     return parser.parse_args()
 
+
+
 def main():
     args = parse_args()
-
-################################################################################################
-# example/demo output... erase me! VVV
-
-    # usage: make a dg object to run queries through #
-
-    # object using command line args
-    dg1 = dg(args.query, args.pages, args.offset, args.time_window, args.exclude_junk, args.headers)
-
-    # object with query set in constructor. note all other params have default values.. you can overwrite them or leave them alone
-    dg2 = dg("dg2.query test")
-
-    # if you want to run a sequence of queries but leave your other params the same,
-    # you can use 1 dg instance and loop over your queries, setting googler.query = this_query then calling dg.run()
-
+    
+    dg1 = dg(args.query, pages=args.pages, offset=args.offset, time_window=args.time_window, exclude_junk=args.exclude_junk, headers=args.headers, delay=args.delay, verbose=args.verbose, no_banner=args.no_banner, all_pages=args.all_pages)
     search_results = dg1.run()
-    #more_results = dg2.run()
-
+    
     if not search_results:
         print("no results")
     else:
         final_string = "-- %i results --\n\n" % len(search_results)
         for result in search_results:
-            final_string += result['desc'] + '\n' + result['url'] + '\n\n'
+            if not args.url_only:
+                final_string += result['desc'] + '\n' 
+            final_string += result['url'] + '\n\n'
         if final_string[-2:] == '\n\n':
             final_string = final_string[:-2]
+        
         print(final_string)
-################################################################################################
+
 
 if __name__ == '__main__':
     main()
