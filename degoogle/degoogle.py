@@ -184,7 +184,6 @@ Proxies: {}
                 results[len(results)-1]['links'] = results[len(results)-1]['links'] + extracted_links
                 
                 if not extracted_links:
-                    print(r.text)
                     self.verbose_log("No more links\n")
                     break
                 else: 
