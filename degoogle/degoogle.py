@@ -5,6 +5,7 @@ import re
 import requests
 from lxml import html
 import time
+import sys
 
 class dg():
 
@@ -13,7 +14,7 @@ class dg():
     junk_strings = ['facebook.com/', 'pinterest.com/', 'quora.com/', 'youtube.com/', 'youtu.be/']
     junk_exclusion = r"(?:" + "|".join(junk_strings).replace(".", "\.") + ")"
 
-    def __init__(self, queries=[], pages=1, offset=0, time_window='a', exclude_junk=True, headers=None, all_pages=False, delay=1000, verbose=False, no_banner=False):
+    def __init__(self, queries=[], pages=1, offset=0, time_window='a', exclude_junk=True, headers=None, all_pages=False, delay=1000, verbose=False, no_banner=False, proxies=None):
         self.queries = queries
         self.pages = pages
         self.offset = offset
@@ -24,6 +25,12 @@ class dg():
         self.delay = delay
         self.verbose = verbose
         self.no_banner = no_banner
+        
+        self.proxies = proxies or []
+        self.proxy_count = len(proxies)
+        self.current_proxy_index = 0
+        
+        sys.stdout.reconfigure(line_buffering=True)
     
     def show_banner(self):
         return print("""
@@ -58,7 +65,14 @@ class dg():
 
         return res
 
-    def get_page(self, query, page, offset):
+    def cycle_proxies(self):
+        proxy = self.proxies[self.current_proxy_index]
+        self.current_proxy_index += 1
+        if self.current_proxy_index >= self.proxy_count:
+            self.current_proxy_index = 0
+        return proxy
+    
+    def get_page(self, query, page, offset, proxy=None):
         pg = (page * 10) + (offset * 10) # offset factored in
         # since the digit piece is variable, i can't use argparse.choices :(
         if (self.time_window[0] not in ('a', 'd', 'h', 'm', 'n', 'w', 'y')) or (len(self.time_window) > 1 and not self.time_window[1:].isdigit()):
@@ -70,7 +84,7 @@ class dg():
 
         self.verbose_log(url)
 
-        return requests.get(url, headers=self.headers)
+        return requests.get(url, headers=self.headers, proxies=proxy, timeout=10)
 
     def extract_links(self, page_content):
         page_tree = html.fromstring(page_content)
@@ -106,7 +120,8 @@ Queries: {}
 Pages: {}
 Offset: {}
 Delay: {}ms
-""".format(self.queries, self.pages, self.offset, self.delay))
+Proxies: {}
+""".format(self.queries, self.pages, self.offset, self.delay, self.proxy_count))
         
         if not self.queries:
             print("Error: Query not specified.")
@@ -116,6 +131,7 @@ Delay: {}ms
 
         for query in self.queries:
             self.verbose_log("--- Current query: {} ---".format(query))
+
             results.append(
                 {
                     "query": query,
@@ -129,18 +145,58 @@ Delay: {}ms
                 
                 self.verbose_log("Current page: {}".format(page + 1 + self.offset))
                 
-                r = self.get_page(query, page, self.offset)
+                if self.proxies:
+                    proxy = self.cycle_proxies()
+                    print("Current proxy: {}".format(proxy))
+                else:
+                    proxy = None
+                
+                try:
+                    r = self.get_page(query, page, self.offset, proxy)
+                except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.SSLError):
+                    print("Proxy did not work, getting new proxy!")
+                    continue
+                
+                if "solveSimpleChallenge(,);" in r.text:
+                    if self.proxies:
+                        print("Proxy is IP banned, getting new proxy!")
+                        continue
+                    print("IP address is blocked! To search, please use a proxy.")
+                    return False
+                
+                if "<ins>That’s an error.</ins>" in r.text:
+                    if self.proxies:
+                        print("Proxy broke page, getting new proxy!")
+                        continue
+                    else:
+                        print("Something went wrong!")
+                        return False
+                
+                if "google" not in r.text:
+                    if self.proxies:
+                        print("Proxy modified webpage, getting new proxy!")
+                        continue
+                    else:
+                        print("Something went wrong!")
+                        return False
+                
                 extracted_links = self.extract_links(r.text)
                 results[len(results)-1]['links'] = results[len(results)-1]['links'] + extracted_links
                 
-                self.verbose_log("Links extracted: {}".format(len(extracted_links)))
+                if not extracted_links:
+                    print(r.text)
+                    self.verbose_log("No more links\n")
+                    break
+                else: 
+                    self.verbose_log("Links extracted: {}".format(len(extracted_links)))
+
                 self.verbose_log("Links total: {}\n".format(len(results[len(results)-1]['links'])))
                 
-                if not extracted_links:
-                    self.verbose_log("No more links")
-                    break
-                
                 page += 1
+                
+                if self.proxies:
+                    self.current_proxy_index -= 1 # proxy worked
+                
                 time.sleep(self.delay / 1000)
 
         return results
@@ -160,14 +216,35 @@ def parse_args():
     parser.add_argument('-v', '--verbose', dest='verbose', action='store_true', help='show verbose output')
     parser.add_argument('--no-banner', dest='no_banner', action='store_true', help='do not show banner')
     parser.add_argument('-j', '--exclude-junk', dest='exclude_junk', action='store_false', help='exclude junk (yt, fb, quora)')
-    parser.add_argument('-H', dest='headers', action='append', help='Add custom headers to the search request')
-    
+    parser.add_argument('-H', '--header', dest='headers', action='append', help='Add custom headers to the search request (FORMAT: {"Header":"Value"} )')
+    parser.add_argument('--proxy-list', dest='proxies', type=str, help='Use a proxy list and cycle between all requests (File pathname)')
+
     return parser.parse_args()
+
+def parse_proxy(proxy):
+    res = {}
+    
+    if "HTTPS]" not in proxy:
+        raise Exception("Proxy MUST be HTTPS!")
+    
+    res['http'] =  "http://" + proxy[proxy.find("] ") + 2:-1]
+    res['https'] = "http://" + proxy[proxy.find("] ") + 2:-1]
+    
+    return res
 
 def main():
     args = parse_args()
- 
-    dg1 = dg(args.queries, pages=args.pages, offset=args.offset, time_window=args.time_window, exclude_junk=args.exclude_junk, headers=args.headers, delay=args.delay, verbose=args.verbose, no_banner=args.no_banner, all_pages=args.all_pages)
+    
+    if args.proxies:
+        with open(args.proxies) as fh:
+            content = fh.read()
+        
+        proxies = content.split("\n")
+        proxies = list(map(lambda proxy: parse_proxy(proxy), filter(lambda x: x, proxies)))
+    else:
+        proxies = []
+    
+    dg1 = dg(args.queries, pages=args.pages, offset=args.offset, time_window=args.time_window, exclude_junk=args.exclude_junk, headers=args.headers, delay=args.delay, verbose=args.verbose, no_banner=args.no_banner, all_pages=args.all_pages, proxies=proxies)
     search_results = dg1.run()
     
     if not search_results:
