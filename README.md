@@ -4,39 +4,43 @@ search Google and extract result urls directly. skip all the click-through links
 contributions welcome
 
 ---
-install with pip:
-`pip install degoogle`
-
-or
+## Installation
 ```
 git clone
 cd degoogle
 pip install .
 ```
-
----
-| command line usage | script usage |
-|-|-|
-| `degoogle "query here"` | make a `dg` object, execute queries with `run()`|
-
+## Usage
 ```
-usage: degoogle [-h] [-o OFFSET] [-p PAGES] [-t TIME_WINDOW] [-j] query
+usage: degoogle [-h] [--offset OFFSET] [-p PAGES] [-A] [-d DELAY]
+                [-t TIME_WINDOW] [--urls-only] [-v] [--no-banner] [-j]
+                [-H HEADERS] [--proxy-list PROXIES]
+                queries [queries ...]
 
 Search and extract google results.
 
 positional arguments:
-  query                 search query
+  queries               search queries
 
 optional arguments:
   -h, --help            show this help message and exit
-  -o OFFSET, --offset OFFSET
-                        page offset to start from
+  --offset OFFSET       page offset to start from
   -p PAGES, --pages PAGES
                         specify multiple pages
+  -A, --all-pages       get all pages available. (bigger priority than -p)
+  -d DELAY, --delay DELAY
+                        specify delay between requests in ms. (DEFAULT: 1000)
   -t TIME_WINDOW, --time-window TIME_WINDOW
                         time window
+  --urls-only           omit link description
+  -v, --verbose         show verbose output
+  --no-banner           do not show banner
   -j, --exclude-junk    exclude junk (yt, fb, quora)
-
+  -H HEADERS, --header HEADERS
+                        Add custom headers to the search request (FORMAT:
+                        {"Header":"Value"} )
+  --proxy-list PROXIES  Use a proxy list and cycle between all requests (File
+                        pathname)
 ```
 
 *note that `time window` follows a syntax used by google's `tbs` parameter with the `qdr` option (read someone explain how it works [here](https://support.google.com/websearch/thread/7860817?hl=en&msgid=7865083))*
