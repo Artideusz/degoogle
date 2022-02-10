@@ -153,7 +153,7 @@ Proxies: {}
                 
                 try:
                     r = self.get_page(query, page, self.offset, proxy)
-                except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.SSLError):
+                except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.SSLError, requests.exceptions.ConnectionError):
                     print("Proxy did not work, getting new proxy!")
                     continue
                 
@@ -223,11 +223,15 @@ def parse_args():
 def parse_proxy(proxy):
     res = {}
     
-    if "HTTPS]" not in proxy:
-        raise Exception("Proxy MUST be HTTPS!")
-    
-    res['http'] =  "http://" + proxy[proxy.find("] ") + 2:-1]
-    res['https'] = "http://" + proxy[proxy.find("] ") + 2:-1]
+    if "HTTPS]" in proxy:
+        res['http'] =  "http://" + proxy[proxy.find("] ") + 2:-1]
+        res['https'] = "http://" + proxy[proxy.find("] ") + 2:-1]
+    elif "SOCKS5]" in proxy:
+        print("Got a SOCKS5 proxy")
+        res['http'] =  "socks5://" + proxy[proxy.find("] ") + 2:-1]
+        res['https'] = "socks5://" + proxy[proxy.find("] ") + 2:-1]
+    else:
+        raise Exception("Proxy MUST be HTTPS or SOCKS5")
     
     return res
 
